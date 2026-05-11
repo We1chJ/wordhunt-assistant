@@ -1,6 +1,6 @@
 pyobjc-framework-Quartz
+pyobjc-framework-Vision
 mss
 opencv-python
-pytesseract
 Pillow
 numpy

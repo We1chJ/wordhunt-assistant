@@ -20,11 +20,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
-try:
-    import pytesseract
-except ImportError:
-    sys.exit("Missing: pip install pytesseract  (also: brew install tesseract)")
+import Quartz
+import Vision
 
 CALIBRATION_FILE = Path(__file__).parent / "calibration.json"
 GRID_ROWS, GRID_COLS = 4, 4
@@ -274,40 +271,56 @@ def load_calibration() -> list[list[tuple]] | None:
 
 
 # ---------------------------------------------------------------------------
-# OCR
+# OCR — Apple Vision
 # ---------------------------------------------------------------------------
 
-_TESS_CONFIG = "--psm 10 --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-
-def _preprocess_cell(cell_bgr: np.ndarray) -> np.ndarray:
-    """
-    Extract the white letter from a colored tile.
-    Returns a binary image suitable for Tesseract.
-    """
-    # Mask pixels with high brightness (the white letter)
-    hsv = cv2.cvtColor(cell_bgr, cv2.COLOR_BGR2HSV)
-    _, _, v = cv2.split(hsv)
-    _, thresh = cv2.threshold(v, 180, 255, cv2.THRESH_BINARY)
-
-    # Slight dilation so thin strokes don't break
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    thresh = cv2.dilate(thresh, kernel, iterations=1)
-
-    # Pad and upscale for Tesseract (works best at ~32px char height)
-    padded = cv2.copyMakeBorder(thresh, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=0)
-    scale = max(1, 64 // padded.shape[0])
-    if scale > 1:
-        padded = cv2.resize(padded, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
-
-    return padded
+def _bgr_to_cgimage(bgr: np.ndarray) -> object:
+    """Convert a BGR numpy array to a CGImage for use with Vision."""
+    rgb = bgr[..., ::-1].copy()  # BGR → RGB
+    h, w = rgb.shape[:2]
+    data = rgb.tobytes()
+    color_space = Quartz.CGColorSpaceCreateDeviceRGB()
+    provider = Quartz.CGDataProviderCreateWithData(None, data, len(data), None)
+    return Quartz.CGImageCreate(
+        w, h, 8, 24, w * 3,
+        color_space,
+        Quartz.kCGBitmapByteOrderDefault | Quartz.kCGImageAlphaNone,
+        provider, None, False,
+        Quartz.kCGRenderingIntentDefault,
+    )
 
 
 def ocr_cell(cell_bgr: np.ndarray) -> str:
-    """OCR a single tile image and return a single uppercase letter."""
-    processed = _preprocess_cell(cell_bgr)
-    text = pytesseract.image_to_string(processed, config=_TESS_CONFIG).strip().upper()
-    # Keep only the first alphabetic character
+    """OCR a single tile with Apple Vision and return a single uppercase letter."""
+    # Upscale so Vision has more pixels to work with
+    scale = max(1, 128 // cell_bgr.shape[0])
+    if scale > 1:
+        cell_bgr = cv2.resize(cell_bgr, None, fx=scale, fy=scale,
+                              interpolation=cv2.INTER_CUBIC)
+
+    cg_image = _bgr_to_cgimage(cell_bgr)
+    results: list[str] = []
+
+    def handler(request, error):
+        if error or not request.results():
+            return
+        for obs in request.results():
+            candidates = obs.topCandidates_(1)
+            if candidates:
+                results.append(candidates[0].string())
+
+    request = Vision.VNRecognizeTextRequest.alloc().initWithCompletionHandler_(handler)
+    request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+    request.setUsesLanguageCorrection_(False)
+    # Hint: only uppercase letters
+    request.setCustomWords_(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+
+    img_handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(
+        cg_image, {}
+    )
+    img_handler.performRequests_error_([request], None)
+
+    text = "".join(results).strip().upper()
     for ch in text:
         if ch.isalpha():
             return ch
