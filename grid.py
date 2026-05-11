@@ -10,8 +10,7 @@ Detection strategy:
   4. Fall back to saved calibration or interactive prompt if detection fails.
 
 OCR per cell:
-  - Isolate the white letter via brightness threshold.
-  - Run Tesseract in single-char mode with A-Z whitelist.
+  - PaddleOCR recognition on each pre-cropped cell (det=False, lang=en).
 """
 
 import json
@@ -20,8 +19,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import Quartz
-import Vision
 
 CALIBRATION_FILE = Path(__file__).parent / "calibration.json"
 GRID_ROWS, GRID_COLS = 4, 4
@@ -271,138 +268,41 @@ def load_calibration() -> list[list[tuple]] | None:
 
 
 # ---------------------------------------------------------------------------
-# Template matching
+# OCR — PaddleOCR
 # ---------------------------------------------------------------------------
 
-TEMPLATES_DIR = Path(__file__).parent / "templates"
-_templates: dict[str, np.ndarray] = {}
-_templates_loaded = False
+_paddle_ocr = None
 
 
-def _isolate_letter(gray: np.ndarray) -> np.ndarray:
-    """Threshold to binary, then keep only the component closest to center."""
-    _, mask = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV)
-    n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    if n <= 1:
-        return mask
-    h, w = mask.shape
-    cx, cy = w / 2, h / 2
-    best = min(range(1, n), key=lambda i: (centroids[i][0]-cx)**2 + (centroids[i][1]-cy)**2)
-    result = np.zeros_like(mask)
-    result[labels == best] = 255
-    return result
-
-
-def _letter_mask(bgr: np.ndarray, size: int = 32) -> np.ndarray:
-    """
-    Isolate the letter, tight-crop to its bounding box, center on a square
-    canvas, then resize — matching exactly how templates were built.
-    """
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    letter = _isolate_letter(gray)
-
-    coords = cv2.findNonZero(letter)
-    if coords is None:
-        return np.zeros((size, size), dtype=np.uint8)
-
-    x, y, w, h = cv2.boundingRect(coords)
-    crop = letter[y:y+h, x:x+w]
-
-    # Center on square canvas
-    pad = 4
-    dim = max(w, h) + pad * 2
-    canvas = np.zeros((dim, dim), dtype=np.uint8)
-    y0 = (dim - h) // 2
-    x0 = (dim - w) // 2
-    canvas[y0:y0+h, x0:x0+w] = crop
-
-    return cv2.resize(canvas, (size, size), interpolation=cv2.INTER_AREA)
-
-
-def _load_templates() -> None:
-    _templates.clear()
-    for path in TEMPLATES_DIR.glob("*.png"):
-        letter = path.stem.upper()
-        if len(letter) == 1 and letter.isalpha():
-            _templates[letter] = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-    print(f"[ocr] Loaded {len(_templates)}/26 templates: {sorted(_templates)}")
-
-
-def _match_template(cell_bgr: np.ndarray) -> tuple[str, float]:
-    """Compare filtered cell against all templates. Returns (letter, score 0–1)."""
-    cell_sig = _letter_mask(cell_bgr).astype(np.float32)
-    best_letter, best_score = "?", -1.0
-    for letter, tmpl in _templates.items():
-        tmpl_sig = cv2.resize(tmpl, (32, 32), interpolation=cv2.INTER_AREA).astype(np.float32)
-        score = float(cv2.matchTemplate(cell_sig, tmpl_sig, cv2.TM_CCOEFF_NORMED)[0, 0])
-        if score > best_score:
-            best_score = score
-            best_letter = letter
-    return best_letter, best_score
-
-
-# ---------------------------------------------------------------------------
-# OCR — Apple Vision (fallback)
-# ---------------------------------------------------------------------------
-
-def _bgr_to_cgimage(bgr: np.ndarray) -> object:
-    """Convert a BGR numpy array to a CGImage for use with Vision."""
-    rgb = bgr[..., ::-1].copy()  # BGR → RGB
-    h, w = rgb.shape[:2]
-    data = rgb.tobytes()
-    color_space = Quartz.CGColorSpaceCreateDeviceRGB()
-    provider = Quartz.CGDataProviderCreateWithData(None, data, len(data), None)
-    return Quartz.CGImageCreate(
-        w, h, 8, 24, w * 3,
-        color_space,
-        Quartz.kCGBitmapByteOrderDefault | Quartz.kCGImageAlphaNone,
-        provider, None, False,
-        Quartz.kCGRenderingIntentDefault,
-    )
-
-
-def _vision_ocr(cell_bgr: np.ndarray) -> str:
-    """Apple Vision fallback for letters without a template."""
-    scale = max(1, 128 // cell_bgr.shape[0])
-    if scale > 1:
-        cell_bgr = cv2.resize(cell_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    cg_image = _bgr_to_cgimage(cell_bgr)
-    results: list[str] = []
-
-    def handler(request, error):
-        if error or not request.results():
-            return
-        for obs in request.results():
-            candidates = obs.topCandidates_(1)
-            if candidates:
-                results.append(candidates[0].string())
-
-    request = Vision.VNRecognizeTextRequest.alloc().initWithCompletionHandler_(handler)
-    request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
-    request.setUsesLanguageCorrection_(False)
-    request.setCustomWords_(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
-    img_handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg_image, {})
-    img_handler.performRequests_error_([request], None)
-
-    text = "".join(results).strip().upper()
-    for ch in text:
-        if ch.isalpha():
-            return ch
-    return "?"
+def _get_ocr():
+    global _paddle_ocr
+    if _paddle_ocr is None:
+        from paddleocr import PaddleOCR
+        _paddle_ocr = PaddleOCR(
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+            lang="en",
+        )
+        print("[ocr] PaddleOCR initialized")
+    return _paddle_ocr
 
 
 def ocr_cell(cell_bgr: np.ndarray) -> str:
-    """Template match first, Vision fallback for low confidence or missing templates."""
-    global _templates_loaded
-    if not _templates_loaded:
-        _load_templates()
-        _templates_loaded = True
+    """Run PaddleOCR on a pre-cropped cell and return the single letter."""
+    ocr = _get_ocr()
+    h, w = cell_bgr.shape[:2]
+    scale = max(1, 96 // min(h, w))
+    if scale > 1:
+        cell_bgr = cv2.resize(cell_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
-    if _templates:
-        letter, _ = _match_template(cell_bgr)
-        return letter
-
-    return _vision_ocr(cell_bgr)
+    results = ocr.predict(cell_bgr)
+    if results:
+        for text in results[0].get("rec_texts", []):
+            for ch in text.strip().upper():
+                if ch.isalpha():
+                    return ch
+    return "I"
 
 
 # ---------------------------------------------------------------------------
