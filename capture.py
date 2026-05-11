@@ -66,8 +66,10 @@ def capture_phone_mirroring() -> tuple[np.ndarray, dict]:
         img_bgr = np.array(img_rgb)[..., ::-1].copy()  # RGB → BGR for OpenCV
 
     print(f"[capture] Screenshot size: {img_bgr.shape[1]}×{img_bgr.shape[0]} px")
-    cv2.imwrite("debug_capture.png", img_bgr)
-    print("[capture] Saved → debug_capture.png")
+    from datetime import datetime
+    filename = datetime.now().strftime("debug_capture_%Y%m%d_%H%M%S.png")
+    cv2.imwrite(filename, img_bgr)
+    print(f"[capture] Saved → {filename}")
     return img_bgr, bounds
 
 
