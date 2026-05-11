@@ -294,10 +294,29 @@ def _isolate_letter(gray: np.ndarray) -> np.ndarray:
 
 
 def _letter_mask(bgr: np.ndarray, size: int = 32) -> np.ndarray:
-    """Isolate the letter (no frame), resize to square for comparison."""
+    """
+    Isolate the letter, tight-crop to its bounding box, center on a square
+    canvas, then resize — matching exactly how templates were built.
+    """
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     letter = _isolate_letter(gray)
-    return cv2.resize(letter, (size, size), interpolation=cv2.INTER_AREA)
+
+    coords = cv2.findNonZero(letter)
+    if coords is None:
+        return np.zeros((size, size), dtype=np.uint8)
+
+    x, y, w, h = cv2.boundingRect(coords)
+    crop = letter[y:y+h, x:x+w]
+
+    # Center on square canvas
+    pad = 4
+    dim = max(w, h) + pad * 2
+    canvas = np.zeros((dim, dim), dtype=np.uint8)
+    y0 = (dim - h) // 2
+    x0 = (dim - w) // 2
+    canvas[y0:y0+h, x0:x0+w] = crop
+
+    return cv2.resize(canvas, (size, size), interpolation=cv2.INTER_AREA)
 
 
 def _load_templates() -> None:
@@ -380,12 +399,8 @@ def ocr_cell(cell_bgr: np.ndarray) -> str:
         _templates_loaded = True
 
     if _templates:
-        letter, score = _match_template(cell_bgr)
-        if score > 0.6:
-            return letter
-        vision_result = _vision_ocr(cell_bgr)
-        print(f"[ocr] Low confidence ({score:.2f}) for '{letter}' → Vision: '{vision_result}'")
-        return vision_result
+        letter, _ = _match_template(cell_bgr)
+        return letter
 
     return _vision_ocr(cell_bgr)
 
