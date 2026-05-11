@@ -64,7 +64,9 @@ for row in grid_layout:
                     print(f"  {raw} already saved — skipping (use --overwrite to replace).")
                     break
                 out_path = TEMPLATES_DIR / f"{raw}.png"
-                cv2.imwrite(str(out_path), cell)
+                gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+                _, filtered = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV)
+                cv2.imwrite(str(out_path), filtered)
                 already_saved.add(raw)
                 still_needed.discard(raw)
                 print(f"  Saved → templates/{raw}.png  "

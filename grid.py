@@ -271,7 +271,59 @@ def load_calibration() -> list[list[tuple]] | None:
 
 
 # ---------------------------------------------------------------------------
-# OCR — Apple Vision
+# Template matching
+# ---------------------------------------------------------------------------
+
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+_templates: dict[str, np.ndarray] = {}
+_templates_loaded = False
+
+
+def _isolate_letter(gray: np.ndarray) -> np.ndarray:
+    """Threshold to binary, then keep only the component closest to center."""
+    _, mask = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV)
+    n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if n <= 1:
+        return mask
+    h, w = mask.shape
+    cx, cy = w / 2, h / 2
+    best = min(range(1, n), key=lambda i: (centroids[i][0]-cx)**2 + (centroids[i][1]-cy)**2)
+    result = np.zeros_like(mask)
+    result[labels == best] = 255
+    return result
+
+
+def _letter_mask(bgr: np.ndarray, size: int = 32) -> np.ndarray:
+    """Isolate the letter (no frame), resize to square for comparison."""
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    letter = _isolate_letter(gray)
+    return cv2.resize(letter, (size, size), interpolation=cv2.INTER_AREA)
+
+
+def _load_templates() -> None:
+    _templates.clear()
+    for path in TEMPLATES_DIR.glob("*.png"):
+        letter = path.stem.upper()
+        if len(letter) == 1 and letter.isalpha():
+            _templates[letter] = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    print(f"[ocr] Loaded {len(_templates)}/26 templates: {sorted(_templates)}")
+
+
+def _match_template(cell_bgr: np.ndarray) -> tuple[str, float]:
+    """Compare filtered cell against all templates. Returns (letter, score 0–1)."""
+    cell_sig = _letter_mask(cell_bgr).astype(np.float32)
+    best_letter, best_score = "?", -1.0
+    for letter, tmpl in _templates.items():
+        tmpl_sig = cv2.resize(tmpl, (32, 32), interpolation=cv2.INTER_AREA).astype(np.float32)
+        score = float(cv2.matchTemplate(cell_sig, tmpl_sig, cv2.TM_CCOEFF_NORMED)[0, 0])
+        if score > best_score:
+            best_score = score
+            best_letter = letter
+    return best_letter, best_score
+
+
+# ---------------------------------------------------------------------------
+# OCR — Apple Vision (fallback)
 # ---------------------------------------------------------------------------
 
 def _bgr_to_cgimage(bgr: np.ndarray) -> object:
@@ -290,14 +342,11 @@ def _bgr_to_cgimage(bgr: np.ndarray) -> object:
     )
 
 
-def ocr_cell(cell_bgr: np.ndarray) -> str:
-    """OCR a single tile with Apple Vision and return a single uppercase letter."""
-    # Upscale so Vision has more pixels to work with
+def _vision_ocr(cell_bgr: np.ndarray) -> str:
+    """Apple Vision fallback for letters without a template."""
     scale = max(1, 128 // cell_bgr.shape[0])
     if scale > 1:
-        cell_bgr = cv2.resize(cell_bgr, None, fx=scale, fy=scale,
-                              interpolation=cv2.INTER_CUBIC)
-
+        cell_bgr = cv2.resize(cell_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     cg_image = _bgr_to_cgimage(cell_bgr)
     results: list[str] = []
 
@@ -312,12 +361,8 @@ def ocr_cell(cell_bgr: np.ndarray) -> str:
     request = Vision.VNRecognizeTextRequest.alloc().initWithCompletionHandler_(handler)
     request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
     request.setUsesLanguageCorrection_(False)
-    # Hint: only uppercase letters
     request.setCustomWords_(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
-
-    img_handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(
-        cg_image, {}
-    )
+    img_handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg_image, {})
     img_handler.performRequests_error_([request], None)
 
     text = "".join(results).strip().upper()
@@ -325,6 +370,24 @@ def ocr_cell(cell_bgr: np.ndarray) -> str:
         if ch.isalpha():
             return ch
     return "?"
+
+
+def ocr_cell(cell_bgr: np.ndarray) -> str:
+    """Template match first, Vision fallback for low confidence or missing templates."""
+    global _templates_loaded
+    if not _templates_loaded:
+        _load_templates()
+        _templates_loaded = True
+
+    if _templates:
+        letter, score = _match_template(cell_bgr)
+        if score > 0.6:
+            return letter
+        vision_result = _vision_ocr(cell_bgr)
+        print(f"[ocr] Low confidence ({score:.2f}) for '{letter}' → Vision: '{vision_result}'")
+        return vision_result
+
+    return _vision_ocr(cell_bgr)
 
 
 # ---------------------------------------------------------------------------
