@@ -39,7 +39,7 @@ if not still_needed:
 print(f"\nLoaded: {image_path}")
 print(f"Templates saved so far: {sorted(already_saved) or 'none'}")
 print(f"Still needed: {sorted(still_needed)}")
-print("\nFor each tile: type the letter and press Enter. Press S to skip, Q to quit.\n")
+print("\nFor each tile: type the letter and press Enter. Leave blank to skip. Ctrl+C to quit.\n")
 
 grid_layout = _region_to_grid(GRID_X1, GRID_Y1, GRID_X2, GRID_Y2)
 ZOOM = 8  # upscale factor for display
@@ -49,19 +49,14 @@ for row in grid_layout:
         cell = img[y:y+h, x:x+w]
         zoomed = cv2.resize(cell, (w * ZOOM, h * ZOOM), interpolation=cv2.INTER_NEAREST)
 
-        # Draw a border so it's easy to see the tile boundary
         bordered = cv2.copyMakeBorder(zoomed, 4, 4, 4, 4, cv2.BORDER_CONSTANT, value=(40, 40, 40))
 
-        cv2.imshow("Cell — type the letter, S=skip, Q=quit", bordered)
+        cv2.imshow("Cell — type the letter in the terminal", bordered)
         cv2.waitKey(1)
 
         while True:
-            raw = input("  Letter: ").strip().upper()
-            if raw == "Q":
-                cv2.destroyAllWindows()
-                print("\nQuitting. Progress saved.")
-                sys.exit(0)
-            if raw == "S":
+            raw = input("  Letter (blank=skip): ").strip().upper()
+            if raw == "":
                 print("  Skipped.")
                 break
             if len(raw) == 1 and raw.isalpha():
@@ -76,7 +71,7 @@ for row in grid_layout:
                       f"({len(already_saved)}/26 collected, "
                       f"still need: {sorted(still_needed) or 'all done!'})")
                 break
-            print("  Please type a single letter (A-Z), S to skip, or Q to quit.")
+            print("  Please type a single letter A-Z, or leave blank to skip.")
 
 cv2.destroyAllWindows()
 print(f"\nDone. {len(already_saved)}/26 templates collected.")
