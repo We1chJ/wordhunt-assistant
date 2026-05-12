@@ -21,9 +21,9 @@ CELL = 58
 GAP  = 5
 
 # Timing for autoplay (seconds)
-DRAG_STEP_DELAY  = 0.04   # between each tile in a drag
-WORD_END_DELAY   = 0.45   # pause after releasing last tile
-AUTOPLAY_LEAD_IN = 2.0    # countdown before first word starts
+DRAG_STEP_DELAY  = 0.03  # between each tile in a drag
+WORD_END_DELAY   = 0.1   # pause after releasing last tile
+AUTOPLAY_LEAD_IN = 0.1    # countdown before first word starts
 
 
 def _points(word: str) -> int:
@@ -185,6 +185,11 @@ class WordHuntApp:
         self.listbox.pack(side="left", fill="both", expand=True)
         self.listbox.bind("<<ListboxSelect>>", self._on_listbox_select)
 
+        self._score_var = tk.StringVar(value="")
+        tk.Label(root, textvariable=self._score_var,
+                 font=("Helvetica", 12, "bold"), fg="#34c759"
+                 ).pack(padx=PAD, pady=(0, 2))
+
         # ── Buttons ───────────────────────────────────────────────────
         bf = tk.Frame(root)
         bf.pack(fill="x", padx=PAD, pady=(6, PAD))
@@ -337,16 +342,12 @@ class WordHuntApp:
             self._set_status(f"Playing {word} ({idx+1}/{len(self._words)}) — Esc to stop", "blue")
             _drag_path(path, bounds, scale, self._autoplay_stop)
 
-            # Interruptible pause between words
-            deadline = time.monotonic() + WORD_END_DELAY
-            while time.monotonic() < deadline:
-                if self._autoplay_stop.is_set() or _is_escape_pressed():
-                    self._autoplay_stop.set()
-                    break
-                time.sleep(0.05)
-
-            if self._autoplay_stop.is_set():
+            if self._autoplay_stop.is_set() or _is_escape_pressed():
+                self._autoplay_stop.set()
                 break
+
+            if WORD_END_DELAY > 0:
+                time.sleep(WORD_END_DELAY)
 
         self._autoplay_running = False
         self.root.after(0, self._on_autoplay_done)
@@ -509,6 +510,8 @@ with keyboard.Listener(on_press=on_press) as listener:
             self.listbox.itemconfig(i, fg=PALETTE_HEX[i % len(PALETTE_HEX)])
 
         n = len(all_words)
+        total = sum(_points(w) for w, _ in all_words)
+        self._score_var.set(f"Total: {total:,} pts")
         self._set_status(f"{len(solutions)} paths · {n} words", "green")
         self._show_word(0)
         self.start_btn.config(state="normal")
